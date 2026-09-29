@@ -1,0 +1,14 @@
+{
+  "name": "penerimaan-raport-sekolah",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Workflow n8n (Telegram) untuk informasi SPMB dan penerimaan rapor SMP IT Abu Bakar Yogyakarta",
+  "scripts": {
+    "build": "node src/build-workflow.mjs",
+    "test": "node --test src/test/logika.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

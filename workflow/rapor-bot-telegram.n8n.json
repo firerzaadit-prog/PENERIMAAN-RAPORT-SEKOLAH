@@ -1,0 +1,1341 @@
+{
+  "id": "RaportBotTg00001",
+  "name": "Chatbot Rapor & SPMB - SMP IT Abu Bakar (Telegram)",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message",
+          "callback_query"
+        ],
+        "additionalFields": {}
+      },
+      "id": "ca15ce8f-f861-4415-ad29-c3b23023d80b",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.5,
+      "position": [
+        0,
+        480
+      ],
+      "webhookId": "de790a41-d3da-4ec2-a6f7-6fc1ff5528af"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalisasi update Telegram -> format netral-channel.\n// Hanya node ini (dan node Telegram) yang khusus Telegram. Saat pindah ke WhatsApp/kirimi.id,\n// cukup buat node ini menghasilkan field yang sama; node lain tidak perlu diubah.\nconst update = $input.first().json;\n\nconst cb = update.callback_query;\nconst msg = update.message;\nconst chat = cb ? cb.message?.chat : msg?.chat;\nconst from = cb ? cb.from : msg?.from;\n\n// Hanya layani chat pribadi. Data rapor bersifat rahasia, jadi grup/kanal dan bot lain diabaikan.\nif (!chat || chat.type !== 'private' || !from || from.is_bot) return [];\n\n// ---------- Parser tanggal -> 'YYYY-MM-DD' (urutan hari-bulan-tahun, bukan format Amerika) ----------\n// Salinan yang sama dipakai di node \"Normalisasi Input\" dan \"Cocokkan Siswa\"; jika diubah, ubah keduanya.\nconst BULAN = {\n  januari: 1, jan: 1,\n  februari: 2, pebruari: 2, feb: 2,\n  maret: 3, mar: 3,\n  april: 4, apr: 4,\n  mei: 5, may: 5,\n  juni: 6, jun: 6,\n  juli: 7, jul: 7,\n  agustus: 8, agu: 8, agt: 8, aug: 8,\n  september: 9, sep: 9, sept: 9,\n  oktober: 10, okt: 10, oct: 10,\n  november: 11, nov: 11, nopember: 11,\n  desember: 12, des: 12, dec: 12,\n};\n\nconst tanggalIso = (y, m, d) => {\n  if (!(y >= 1900 && y <= 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31)) return null;\n  const t = new Date(Date.UTC(y, m - 1, d));\n  if (t.getUTCFullYear() !== y || t.getUTCMonth() !== m - 1 || t.getUTCDate() !== d) return null;\n  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;\n};\nconst tahun = (t) => (t.length <= 2 ? (Number(t) <= 30 ? 2000 : 1900) + Number(t) : Number(t));\n\nconst parseTanggal = (v) => {\n  if (v === null || v === undefined || v === '') return null;\n  // Tanggal bertipe date di Google Sheets (nomor seri; hari sejak 30 Des 1899)\n  if (typeof v === 'number' && v > 20000 && v < 80000) {\n    const t = new Date(Math.round((v - 25569) * 86400000));\n    return tanggalIso(t.getUTCFullYear(), t.getUTCMonth() + 1, t.getUTCDate());\n  }\n  const s = String(v).toLowerCase();\n  const pola = [\n    // 2011-08-17, 2011/08/17, 2011 08 17 (juga 2011-08-17T00:00:00Z)\n    [/(?<!\\d)(\\d{4})[\\s\\-/.]+(\\d{1,2})[\\s\\-/.]+(\\d{1,2})(?!\\d)/, (m) => tanggalIso(+m[1], +m[2], +m[3])],\n    // 17-08-2011, 17/08/2011, 17.08.2011, 17 08 2011, 17-08-11\n    [/(?<!\\d)(\\d{1,2})[\\s\\-/.]+(\\d{1,2})[\\s\\-/.]+(\\d{4}|\\d{2})(?!\\d)/, (m) => tanggalIso(tahun(m[3]), +m[2], +m[1])],\n    // 17 Agustus 2011, 17-Agu-2011, 17agustus2011\n    [/(?<!\\d)(\\d{1,2})[\\s\\-/.]*([a-z]{3,10})[\\s\\-/.,]*(\\d{4}|\\d{2})(?!\\d)/, (m) => (BULAN[m[2]] ? tanggalIso(tahun(m[3]), BULAN[m[2]], +m[1]) : null)],\n    // 17082011, 20110817, 170811\n    [/(?<!\\d)(\\d{2})(\\d{2})(\\d{4})(?!\\d)/, (m) => tanggalIso(+m[3], +m[2], +m[1])],\n    [/(?<!\\d)(\\d{4})(\\d{2})(\\d{2})(?!\\d)/, (m) => tanggalIso(+m[1], +m[2], +m[3])],\n    [/(?<!\\d)(\\d{2})(\\d{2})(\\d{2})(?!\\d)/, (m) => tanggalIso(tahun(m[3]), +m[2], +m[1])],\n  ];\n  for (const [re, baca] of pola) {\n    const m = s.match(re);\n    const hasil = m ? baca(m) : null;\n    if (hasil) return hasil;\n  }\n  return null;\n};\n\n// Pesan dikirim dengan parse_mode HTML, jadi teks dari pengguna harus di-escape.\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n\nconst kind = cb ? 'callback' : typeof msg.text === 'string' ? 'text' : 'other';\nconst text = kind === 'text' ? msg.text.trim() : '';\nconst data = cb ? String(cb.data ?? '') : '';\n\n// Tombol inline (callback_data) -> intent\nconst TOMBOL = { 'm:main': 'menu', 'm:spmb': 'spmb', 'm:lhb': 'lhb', 'c:ya': 'ya', 'c:no': 'batal' };\nconst PILIHAN = { 'r:intra': 'intra', 'r:kokul': 'kokul', 'r:quran': 'quran' };\n\n// Perintah / kata yang diketik -> intent\nconst KATA = {\n  menu: ['/start', '/menu', 'menu', 'mulai', 'start'],\n  batal: ['/batal', '/cancel', 'batal', 'cancel', 'tidak', 'bukan', 'salah', 'no'],\n  ya: ['ya', 'y', 'iya', 'yes', 'ok', 'oke', 'betul', 'benar'],\n  spmb: ['spmb', 'ppdb'],\n  lhb: ['rapor', 'raport', 'lhb', 'laporan'],\n};\n\nlet intent = 'teks';\nlet pilih = '';\n\nif (kind === 'callback') {\n  if (PILIHAN[data]) {\n    intent = 'pilih';\n    pilih = PILIHAN[data];\n  } else {\n    intent = TOMBOL[data] || 'menu';\n  }\n} else if (kind === 'text') {\n  const kataPertama = text.split(/\\s+/)[0].toLowerCase();\n  const perintah = kataPertama.startsWith('/') ? kataPertama.replace(/@.*$/, '') : '';\n  const kunci = perintah || text.toLowerCase().replace(/[\\s.!?,]+$/g, '');\n  intent = Object.keys(KATA).find((k) => KATA[k].includes(kunci)) || 'teks';\n} else {\n  intent = 'lain';\n}\n\n// \"NIS [spasi] tanggal lahir\". Pemisah yang diterima: spasi, _, koma, titik koma, titik dua, |, / dan -.\n// credNis / credDob baru terisi bila keduanya masuk akal, sehingga ketikan asal tidak memicu pembacaan Sheet.\nlet credNis = '';\nlet credDob = '';\nif (intent === 'teks') {\n  const m = text.replace(/^nis\\b[\\s:=.]*/i, '').match(/^([A-Za-z0-9]+)[\\s_,;:|/\\\\-]+(\\S.*)$/);\n  const tanggal = m ? parseTanggal(m[2]) : null;\n  if (m && tanggal && /^(?=.*\\d)[A-Za-z0-9]{3,20}$/.test(m[1])) {\n    credNis = m[1].toUpperCase();\n    credDob = tanggal; // 'YYYY-MM-DD'\n  }\n}\n\nreturn [\n  {\n    json: {\n      channel: 'telegram',\n      chatId: String(chat.id),\n      sapaan: esc(from.first_name || 'Ayah/Bunda'),\n      kind,\n      text,\n      intent,\n      pilih,\n      credNis,\n      credDob,\n      callbackId: cb ? String(cb.id) : '',\n    },\n  },\n];"
+      },
+      "id": "42e12e7e-8bbc-4943-a37f-81c9d3122fea",
+      "name": "Normalisasi Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        480
+      ],
+      "notes": "Mengubah update Telegram menjadi format netral-channel + mengenali maksud pengguna (intent)."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "7a924d4a-0042-4cff-acf0-1fbaacde7284",
+              "leftValue": "={{ $json.kind }}",
+              "rightValue": "callback",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8a423f0a-1101-4514-ad42-ca127b33904d",
+      "name": "Klik Tombol?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        480,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "callback",
+        "operation": "answerQuery",
+        "queryId": "={{ $json.callbackId }}",
+        "additionalFields": {}
+      },
+      "id": "c9549cd9-be32-405e-abac-243351df8663",
+      "name": "Jawab Callback",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        720,
+        336
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Menghilangkan animasi \"memuat\" di tombol yang ditekan."
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "sesi_bot"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "chat_id",
+              "condition": "eq",
+              "keyValue": "={{ $('Normalisasi Input').first().json.chatId }}"
+            }
+          ]
+        },
+        "limit": 1
+      },
+      "id": "92fd0d84-c493-4745-a173-4a9c03e4c17c",
+      "name": "Ambil Sesi",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        960,
+        480
+      ],
+      "alwaysOutputData": true,
+      "notes": "Data table \"sesi_bot\" (dibuat oleh cabang \"Setup: Jalankan Sekali\")."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "8cb42b12-aa23-413a-a558-24c74b387aad",
+              "leftValue": "={{ ['await_cred', 'await_confirm'].includes($json.state ?? '') }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "da3013d4-71b3-439e-a227-f1a7634e8d4a",
+              "leftValue": "={{ $('Normalisasi Input').first().json.intent }}",
+              "rightValue": "teks",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "ea064fbf-4e0a-42ad-a1c0-6737215af3dc",
+              "leftValue": "={{ $('Normalisasi Input').first().json.credNis }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "84a47644-8364-4f6e-a4b1-2e9f6552350c",
+              "leftValue": "={{ $('Normalisasi Input').first().json.credDob }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "cfd83790-5469-49c0-a783-c7cd4b66d812",
+              "leftValue": "={{ (Date.parse($json.locked_until ?? '') || 0) <= Date.now() }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "679a0b22-c55f-4f72-a64f-b37f147e87b1",
+      "name": "Perlu Cari Siswa?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1200,
+        480
+      ],
+      "notes": "Google Sheets hanya dibaca bila: sedang menunggu NIS/tanggal lahir, ketikan terbaca sebagai \"NIS tanggal-lahir\" yang valid, dan pengguna tidak sedang dikunci."
+    },
+    {
+      "parameters": {
+        "resource": "sheet",
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Data Siswa"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "NIS",
+              "lookupValue": "={{ $('Normalisasi Input').first().json.credNis }}"
+            }
+          ]
+        },
+        "options": {
+          "returnFirstMatch": true,
+          "outputFormatting": {
+            "values": {
+              "general": "UNFORMATTED_VALUE",
+              "date": "SERIAL_NUMBER"
+            }
+          }
+        }
+      },
+      "id": "08a894b0-03ab-44f0-ab49-aa634974e2aa",
+      "name": "Baca Data Siswa",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1440,
+        336
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "notes": "Pilih dokumen Google Sheet Anda. Tab \"Data Siswa\" dengan kolom: NIS | Nama | Kelas | Tanggal Lahir | Intrakurikuler | Kokurikuler | Al Quran"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Cocokkan NIS + tanggal lahir yang diketik pengguna dengan baris siswa dari Google Sheets.\n// Input node ini = hasil \"Baca Data Siswa\": 0 atau 1 baris (kosong bila NIS tidak ditemukan),\n// atau satu item {error: '...'} bila Google Sheets gagal diakses (node itu memakai \"continue on error\").\n// Output: status 'error' | 'no_match' | 'match' + data siswa. Tanggal lahir TIDAK ikut dikeluarkan.\n// Bila data siswa pindah ke sumber lain (database, API), cukup ganti node pembacanya dan\n// pertahankan bentuk output node ini.\nconst inp = $('Normalisasi Input').first().json;\nconst semua = $input.all().map((i) => i.json);\nconst gagalBaca = semua.some((r) => r && Object.keys(r).length === 1 && typeof r.error === 'string');\nconst baris = semua.filter((r) => r && Object.keys(r).length > 0);\n\n// ---------- Nama kolom di Sheet (huruf besar/kecil & tanda baca diabaikan) ----------\nconst KOLOM = {\n  nis: ['nis', 'nisn', 'nomorinduk'],\n  nama: ['nama', 'namasiswa', 'namalengkap'],\n  kelas: ['kelas', 'rombel'],\n  lahir: ['tanggallahir', 'tgllahir', 'ttl', 'lahir'],\n  intra: ['intrakurikuler', 'raporintrakurikuler', 'akademik', 'raporakademik'],\n  kokul: ['kokurikuler', 'raporkokurikuler', 'ekstrakurikuler', 'raporekstrakurikuler', 'ekskul'],\n  quran: ['alquran', 'raporalquran', 'quran', 'raporquran'],\n};\n\nconst kunciKolom = (k) => String(k).toLowerCase().replace(/[^a-z0-9]/g, '');\nconst ambil = (row, alias) => {\n  const peta = {};\n  for (const k of Object.keys(row)) peta[kunciKolom(k)] = row[k];\n  for (const a of alias) if (peta[a] !== undefined && peta[a] !== null && peta[a] !== '') return peta[a];\n  return '';\n};\nconst teks = (v) => String(v ?? '').trim();\nconst normNis = (v) => teks(v).replace(/\\s+/g, '').toUpperCase();\n\n// ---------- ID file Google Drive (tautan atau ID mentah) ----------\nconst idDrive = (v) => {\n  const s = teks(v);\n  if (!s) return '';\n  const m = s.match(/\\/d\\/([A-Za-z0-9_-]{10,})/) || s.match(/[?&]id=([A-Za-z0-9_-]{10,})/);\n  if (m) return m[1];\n  return /^[A-Za-z0-9_-]{10,}$/.test(s) ? s : '';\n};\n\n// ---------- Parser tanggal -> 'YYYY-MM-DD' (urutan hari-bulan-tahun, bukan format Amerika) ----------\n// Salinan yang sama dipakai di node \"Normalisasi Input\" dan \"Cocokkan Siswa\"; jika diubah, ubah keduanya.\nconst BULAN = {\n  januari: 1, jan: 1,\n  februari: 2, pebruari: 2, feb: 2,\n  maret: 3, mar: 3,\n  april: 4, apr: 4,\n  mei: 5, may: 5,\n  juni: 6, jun: 6,\n  juli: 7, jul: 7,\n  agustus: 8, agu: 8, agt: 8, aug: 8,\n  september: 9, sep: 9, sept: 9,\n  oktober: 10, okt: 10, oct: 10,\n  november: 11, nov: 11, nopember: 11,\n  desember: 12, des: 12, dec: 12,\n};\n\nconst tanggalIso = (y, m, d) => {\n  if (!(y >= 1900 && y <= 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31)) return null;\n  const t = new Date(Date.UTC(y, m - 1, d));\n  if (t.getUTCFullYear() !== y || t.getUTCMonth() !== m - 1 || t.getUTCDate() !== d) return null;\n  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;\n};\nconst tahun = (t) => (t.length <= 2 ? (Number(t) <= 30 ? 2000 : 1900) + Number(t) : Number(t));\n\nconst parseTanggal = (v) => {\n  if (v === null || v === undefined || v === '') return null;\n  // Tanggal bertipe date di Google Sheets (nomor seri; hari sejak 30 Des 1899)\n  if (typeof v === 'number' && v > 20000 && v < 80000) {\n    const t = new Date(Math.round((v - 25569) * 86400000));\n    return tanggalIso(t.getUTCFullYear(), t.getUTCMonth() + 1, t.getUTCDate());\n  }\n  const s = String(v).toLowerCase();\n  const pola = [\n    // 2011-08-17, 2011/08/17, 2011 08 17 (juga 2011-08-17T00:00:00Z)\n    [/(?<!\\d)(\\d{4})[\\s\\-/.]+(\\d{1,2})[\\s\\-/.]+(\\d{1,2})(?!\\d)/, (m) => tanggalIso(+m[1], +m[2], +m[3])],\n    // 17-08-2011, 17/08/2011, 17.08.2011, 17 08 2011, 17-08-11\n    [/(?<!\\d)(\\d{1,2})[\\s\\-/.]+(\\d{1,2})[\\s\\-/.]+(\\d{4}|\\d{2})(?!\\d)/, (m) => tanggalIso(tahun(m[3]), +m[2], +m[1])],\n    // 17 Agustus 2011, 17-Agu-2011, 17agustus2011\n    [/(?<!\\d)(\\d{1,2})[\\s\\-/.]*([a-z]{3,10})[\\s\\-/.,]*(\\d{4}|\\d{2})(?!\\d)/, (m) => (BULAN[m[2]] ? tanggalIso(tahun(m[3]), BULAN[m[2]], +m[1]) : null)],\n    // 17082011, 20110817, 170811\n    [/(?<!\\d)(\\d{2})(\\d{2})(\\d{4})(?!\\d)/, (m) => tanggalIso(+m[3], +m[2], +m[1])],\n    [/(?<!\\d)(\\d{4})(\\d{2})(\\d{2})(?!\\d)/, (m) => tanggalIso(+m[1], +m[2], +m[3])],\n    [/(?<!\\d)(\\d{2})(\\d{2})(\\d{2})(?!\\d)/, (m) => tanggalIso(tahun(m[3]), +m[2], +m[1])],\n  ];\n  for (const [re, baca] of pola) {\n    const m = s.match(re);\n    const hasil = m ? baca(m) : null;\n    if (hasil) return hasil;\n  }\n  return null;\n};\n\n// ---------- Pencocokan ----------\nconst kosong = { nis: '', nama: '', kelas: '', files: { intra: '', kokul: '', quran: '' } };\nif (gagalBaca) return [{ json: { status: 'error', ...kosong } }];\n\nconst nis = normNis(inp.credNis);\nconst siswa = nis ? baris.find((r) => normNis(ambil(r, KOLOM.nis)) === nis) : null;\nconst dobSheet = siswa ? parseTanggal(ambil(siswa, KOLOM.lahir)) : null;\n\n// Pesan yang sama untuk \"NIS tidak ada\" dan \"tanggal lahir salah\" agar NIS tidak bisa ditebak.\nif (!siswa || !dobSheet || dobSheet !== inp.credDob) return [{ json: { status: 'no_match', ...kosong } }];\n\nreturn [\n  {\n    json: {\n      status: 'match',\n      nis,\n      nama: teks(ambil(siswa, KOLOM.nama)),\n      kelas: teks(ambil(siswa, KOLOM.kelas)),\n      files: {\n        intra: idDrive(ambil(siswa, KOLOM.intra)),\n        kokul: idDrive(ambil(siswa, KOLOM.kokul)),\n        quran: idDrive(ambil(siswa, KOLOM.quran)),\n      },\n    },\n  },\n];"
+      },
+      "id": "0180b5a8-067c-4082-acad-27767fb30675",
+      "name": "Cocokkan Siswa",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        336
+      ],
+      "notes": "Membandingkan tanggal lahir yang diketik dengan data Sheet. Pesan \"tidak cocok\" sama untuk NIS salah dan tanggal salah; error Google Sheets dilaporkan sebagai status \"error\"."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Mesin status percakapan (netral-channel). Menentukan balasan berikutnya dan status sesi baru.\n//\n//   idle --(pilih rapor)--> await_cred --(NIS + tgl lahir cocok)--> await_confirm --(YA)--> kirim dokumen --> idle\n//\n// Sesi disimpan di Data Table \"sesi_bot\" (satu baris per chat) oleh node \"Simpan Sesi\",\n// SETELAH balasan terkirim. Node ini tidak menyimpan apa pun; ia hanya mengembalikan `session`.\n\n// ===================== KONFIGURASI (boleh diubah) =====================\nconst KONFIG = {\n  maksGagal: 5, // maksimum data tidak cocok dalam satu jendela waktu\n  jendelaMenit: 15, // panjang jendela penghitungan data tidak cocok\n  kunciMenit: 15, // lama layanan rapor dikunci setelah maksGagal tercapai\n  sesiMenit: 10, // batas waktu menunggu balasan pengguna di tiap langkah\n  kontakAdmin: '088990090900', // dicantumkan di pesan yang mengarahkan ke admin\n};\nconst LABEL = { intra: 'Rapor Intrakurikuler', kokul: 'Rapor Kokurikuler', quran: \"Rapor Al Qur'an\" };\n// ======================================================================\n\nconst ambilNode = (nama) => {\n  try {\n    return $(nama).first()?.json ?? null;\n  } catch (e) {\n    return null; // node tidak dijalankan pada eksekusi ini\n  }\n};\n\nconst inp = $('Normalisasi Input').first().json;\nconst row = ambilNode('Ambil Sesi') ?? {};\nconst cocok = ambilNode('Cocokkan Siswa'); // null bila pencarian siswa tidak dijalankan\n\nconst MENIT = 60 * 1000;\nconst sekarang = Date.now();\nconst iso = (ms) => new Date(ms).toISOString();\nconst waktu = (v) => Date.parse(v) || 0;\nconst h = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); // escape HTML\nconst bersih = (s) => String(s ?? '').replace(/[\\\\/:*?\"<>|\\r\\n]+/g, ' ').replace(/\\s+/g, ' ').trim();\n\n// ---------- Teks balasan (parse_mode HTML) ----------\nconst PESAN = {\n  mintaData: (label) =>\n    `📝 <b>${h(label)}</b>\\n\\n` +\n    `Silakan masukkan <b>NIS [spasi] tanggal lahir</b> ananda.\\n\\n` +\n    `Contoh: <code>12345 17-08-2011</code>\\n\\n` +\n    `Tanggal lahir ditulis hari-bulan-tahun (misalnya 17-08-2011, 17/08/2011, atau 17082011).\\n` +\n    `Ketik /batal untuk membatalkan.`,\n  formatSalah:\n    `⚠️ Format belum sesuai.\\n\\n` +\n    `Silakan kirim <b>NIS [spasi] tanggal lahir</b>, contoh: <code>12345 17-08-2011</code>\\n` +\n    `Ketik /batal untuk membatalkan.`,\n  tidakCocok: (sisa) =>\n    `❌ Data tidak cocok.\\n\\n` +\n    `Periksa kembali NIS dan tanggal lahir ananda, lalu kirim ulang dengan format <b>NIS [spasi] tanggal lahir</b>.\\n\\n` +\n    `Sisa percobaan: ${sisa}`,\n  terkunci: (menit) =>\n    `🔒 Terlalu banyak data yang tidak cocok.\\n\\n` +\n    `Demi keamanan data siswa, layanan rapor dikunci sementara. Silakan coba lagi dalam <b>${menit} menit</b> ` +\n    `atau hubungi admin sekolah (WA ${KONFIG.kontakAdmin}).`,\n  konfirmasi: (nama, kelas, label) =>\n    `✅ Data ditemukan\\n\\n` +\n    `Nama: <b>${h(nama)}</b>\\nKelas: <b>${h(kelas || '-')}</b>\\nDokumen: ${h(label)}\\n\\n` +\n    `Apakah data di atas sudah benar? Ketik <b>YA</b> untuk menerima dokumen rapor, atau <b>BATAL</b> untuk membatalkan.`,\n  ingatkan: (nama) =>\n    `Ketik <b>YA</b> untuk menerima dokumen rapor${nama ? ` atas nama <b>${h(nama)}</b>` : ''}, ` +\n    `atau <b>BATAL</b> untuk membatalkan.`,\n  belumTersedia: (label, nama, kelas) =>\n    `Data ditemukan atas nama <b>${h(nama)}</b> (kelas ${h(kelas || '-')}), namun dokumen <b>${h(label)}</b> belum tersedia.\\n\\n` +\n    `Silakan hubungi admin sekolah (WA ${KONFIG.kontakAdmin}) untuk informasi lebih lanjut.`,\n  gangguanData:\n    `Mohon maaf, data siswa belum dapat diperiksa saat ini. Silakan coba lagi beberapa saat lagi ` +\n    `atau hubungi admin sekolah (WA ${KONFIG.kontakAdmin}).`,\n  dibatalkan: `Baik, proses dibatalkan. Tekan tombol di bawah atau ketik /start untuk kembali ke menu utama.`,\n  sesiBerakhir:\n    `⏱️ Sesi Anda telah berakhir karena terlalu lama tidak ada balasan.\\n\\n` +\n    `Silakan pilih menu kembali dengan menekan tombol di bawah atau ketik /start.`,\n};\n\n// ---------- Sesi saat ini ----------\nlet s = {\n  chat_id: inp.chatId,\n  state: row.state || 'idle',\n  rapor_type: row.rapor_type || '',\n  nis: row.nis || '',\n  nama: row.nama || '',\n  kelas: row.kelas || '',\n  file_ref: row.file_ref || '',\n  fail_count: Number(row.fail_count) || 0,\n  fail_since: row.fail_since || '',\n  locked_until: row.locked_until || '',\n  expires_at: row.expires_at || '',\n};\n// Kembali ke idle; data percobaan gagal & kunci sengaja dipertahankan.\nconst idle = (x) => ({ ...x, state: 'idle', rapor_type: '', nis: '', nama: '', kelas: '', file_ref: '', expires_at: '' });\n\nconst kedaluwarsa = s.state !== 'idle' && waktu(s.expires_at) <= sekarang;\nif (kedaluwarsa) s = idle(s);\n\nconst sisaKunci = Math.ceil((waktu(s.locked_until) - sekarang) / MENIT);\nconst terkunci = sisaKunci > 0;\nconst batasSesi = () => iso(sekarang + KONFIG.sesiMenit * MENIT);\n\nconst hasil = (action, extra = {}) => [{ json: { action, chatId: inp.chatId, session: s, ...extra } }];\nconst teks = (text) => hasil('teks', { text });\n\n// Catat satu data tidak cocok. Mengembalikan true bila kini terkunci.\nconst catatGagal = () => {\n  if (!s.fail_since || sekarang - waktu(s.fail_since) > KONFIG.jendelaMenit * MENIT) {\n    s.fail_since = iso(sekarang);\n    s.fail_count = 0;\n  }\n  s.fail_count += 1;\n  if (s.fail_count < KONFIG.maksGagal) return false;\n  s.locked_until = iso(sekarang + KONFIG.kunciMenit * MENIT);\n  s.fail_count = 0;\n  s.fail_since = '';\n  return true;\n};\n\n// ---------- Keputusan ----------\nswitch (inp.intent) {\n  case 'menu':\n    s = idle(s);\n    return hasil('welcome');\n\n  case 'spmb':\n    s = idle(s);\n    return hasil('spmb');\n\n  case 'lhb':\n    s = idle(s);\n    return hasil('menu_lhb');\n\n  case 'pilih': {\n    s = idle(s);\n    if (terkunci) return teks(PESAN.terkunci(sisaKunci));\n    s.state = 'await_cred';\n    s.rapor_type = inp.pilih;\n    s.expires_at = batasSesi();\n    return teks(PESAN.mintaData(LABEL[inp.pilih]));\n  }\n\n  case 'batal': {\n    const adaProses = s.state !== 'idle' || kedaluwarsa;\n    s = idle(s);\n    return adaProses ? teks(PESAN.dibatalkan) : hasil('welcome');\n  }\n\n  case 'ya': {\n    if (s.state === 'await_confirm' && s.file_ref) {\n      const label = LABEL[s.rapor_type] || 'Rapor';\n      const kirim = {\n        fileId: s.file_ref,\n        fileName: `${bersih(`${label} - ${s.nama}`)}.pdf`,\n        caption: `📄 ${label}\\nNama: ${s.nama}\\nKelas: ${s.kelas || '-'}`,\n      };\n      s = idle(s); // disimpan setelah dokumen terkirim\n      return hasil('send_doc', kirim);\n    }\n    if (s.state === 'await_cred') return teks(PESAN.formatSalah);\n    if (kedaluwarsa) return teks(PESAN.sesiBerakhir);\n    s = idle(s);\n    return hasil('welcome');\n  }\n\n  default: {\n    // intent 'teks' (ketikan bebas) atau 'lain' (stiker, foto, dst.)\n    if (s.state !== 'await_cred' && s.state !== 'await_confirm') {\n      if (kedaluwarsa) return teks(PESAN.sesiBerakhir);\n      s = idle(s);\n      return hasil('welcome');\n    }\n\n    if (terkunci) return teks(PESAN.terkunci(sisaKunci));\n\n    // Tanpa \"NIS tanggal-lahir\" yang terbaca, tidak ada pencarian siswa; sesi dibiarkan apa adanya.\n    if (!inp.credNis || !inp.credDob || !cocok) {\n      return s.state === 'await_cred' ? teks(PESAN.formatSalah) : teks(PESAN.ingatkan(s.nama));\n    }\n\n    // Google Sheets gagal diakses: bukan salah pengguna, jadi tidak dihitung dan sesi dibiarkan agar bisa dicoba lagi.\n    if (cocok.status === 'error') return teks(PESAN.gangguanData);\n\n    // Data baru menggantikan konfirmasi sebelumnya (bila ada).\n    const tipe = s.rapor_type;\n    const label = LABEL[tipe] || 'Rapor';\n    s = idle(s);\n    s.state = 'await_cred';\n    s.rapor_type = tipe;\n    s.expires_at = batasSesi();\n\n    if (cocok.status !== 'match') {\n      if (catatGagal()) {\n        s = idle(s);\n        return teks(PESAN.terkunci(KONFIG.kunciMenit));\n      }\n      return teks(PESAN.tidakCocok(KONFIG.maksGagal - s.fail_count));\n    }\n\n    const file = cocok.files?.[tipe] || '';\n    if (!file) {\n      s = idle(s);\n      return teks(PESAN.belumTersedia(label, cocok.nama, cocok.kelas));\n    }\n    s.state = 'await_confirm';\n    s.nis = cocok.nis;\n    s.nama = cocok.nama;\n    s.kelas = cocok.kelas;\n    s.file_ref = file;\n    return hasil('confirm', { text: PESAN.konfirmasi(cocok.nama, cocok.kelas, label) });\n  }\n}"
+      },
+      "id": "09035187-7bda-423d-a645-669e650b02be",
+      "name": "Mesin Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        480
+      ],
+      "notes": "Otak percakapan: menentukan balasan & status sesi. Batas percobaan, waktu sesi, dan kontak admin ada di konstanta KONFIG (baris atas)."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "bbb41420-7ca2-4ffd-a320-e98472c09e6e",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "welcome",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "welcome"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "76d95484-e653-4347-a04d-36ea35160d32",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "spmb",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "spmb"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "423aecb9-4098-4048-a3bf-1bc9e34e6cb8",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "menu_lhb",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "menu_lhb"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "729efb4a-f565-4788-a02a-34357aa2782d",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "confirm",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "confirm"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "5ba84caf-87ae-4c10-a837-c492da2fbdcb",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "send_doc",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "send_doc"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "c2e4d11c-434d-4432-a566-22f64d7678b2",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "teks",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "teks"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "248c5f7c-5c37-4f6a-a91c-72ad37d22ddc",
+      "name": "Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        2160,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $('Normalisasi Input').first().json.chatId }}",
+        "text": "=Assalamu’alaikum warahmatullahi wabarakatuh\n\nSelamat datang {{ $('Normalisasi Input').first().json.sapaan }}, di SMP IT Abu Bakar Yogyakarta, ini adalah Layanan Chatbot Informasi Sekolah dan Penerimaan Hasil Belajar 😊\n\nAdmin siap membantu memberikan informasi seputar sekolah untuk Anda.\nJelajahi lingkungan dan program unggulan sekolah kami secara digital dengan mengunjungi tautan https://smpit-abubakar.sch.id\n\nAda yang bisa kami bantu hari ini? Silakan pilih menu di bawah ini ya! 👇",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "Informasi SPMB",
+                    "additionalFields": {
+                      "callback_data": "m:spmb"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "Laporan Hasil Belajar",
+                    "additionalFields": {
+                      "callback_data": "m:lhb"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "22a34c5f-8fd6-4e6c-a623-5cd954848cf9",
+      "name": "Kirim Sambutan",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2480,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $('Normalisasi Input').first().json.chatId }}",
+        "text": "✨🌟 PINTU GERBANG GENERASI MASA DEPAN TELAH DIBUKA🌟✨\n\nBismillahirrahmanirrahim\nAssalamu'alaikum Ayah/Bunda Hebat 💛\n\nAlhamdulillah.. \nSISTEM PENERIMAAN MURID BARU (SPMB) \nSMPIT ABU BAKAR YOGYAKARTA \nTAHUN AJARAN 2027/2028 \nRESMI DIBUKA!!! 🎉\n\nIngin ananda menjadi:\n✅ Hafizh/Hafizhah Qur'an\n✅ Berakhlak mulia &amp; Mandiri \n✅ Cerdas, Berprestasi &amp; Berjiwa Pemimpin\n✅ Tumbuh di lingkungan yang Islami &amp; Aman\n\nDi sinilah tempatnya! \nSMP IT Abu Bakar Yogyakarta \n\"Menempa Generasi Qur'ani, Cerdas, Berkarakter\"\n\n📍 Pendaftaran dibuka mulai: 1 Agustus - 16 Oktober 2026\n📍 Informasi &amp; Pendaftaran: \n\nLink pendaftaran: \nhttps://s.id/daftar_smpitaby\n\nCP: 088990090900 (WA Only) \n\nKuota terbatas! Jangan sampai kehabisan ya Ayah/Bunda\nKarena pendidikan terbaik adalah investasi akhirat terbaik 🤲\n\nYuk segera daftarkan putra-putri tercinta!\nBarakallahu fiikum\n\nWassalamu'alaikum warahmatullahi wabarakatuh",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "🏠 Menu Utama",
+                    "additionalFields": {
+                      "callback_data": "m:main"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "9d502155-3596-4f5b-a2e7-9bf1d68b7eb0",
+      "name": "Kirim Info SPMB",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2480,
+        176
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $('Normalisasi Input').first().json.chatId }}",
+        "text": "📚 <b>Laporan Hasil Belajar</b>\n\nSilakan pilih jenis laporan yang ingin Anda terima 👇",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "Intrakurikuler",
+                    "additionalFields": {
+                      "callback_data": "r:intra"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "Kokurikuler",
+                    "additionalFields": {
+                      "callback_data": "r:kokul"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "Al Qur'an",
+                    "additionalFields": {
+                      "callback_data": "r:quran"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "🏠 Menu Utama",
+                    "additionalFields": {
+                      "callback_data": "m:main"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "243db2ec-d206-48d6-aa35-5b1f840626c1",
+      "name": "Kirim Menu Laporan",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2480,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $('Normalisasi Input').first().json.chatId }}",
+        "text": "={{ $('Mesin Status').first().json.text }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "✅ YA",
+                    "additionalFields": {
+                      "callback_data": "c:ya"
+                    }
+                  },
+                  {
+                    "text": "❌ BATAL",
+                    "additionalFields": {
+                      "callback_data": "c:no"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "43fa5d2e-0a56-494d-af2d-f2dc8fd8e8a5",
+      "name": "Kirim Konfirmasi",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2480,
+        528
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $('Normalisasi Input').first().json.chatId }}",
+        "text": "={{ $('Mesin Status').first().json.text }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "🏠 Menu Utama",
+                    "additionalFields": {
+                      "callback_data": "m:main"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "824ad1a8-0ab0-4549-a863-647ab3b45268",
+      "name": "Kirim Teks",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2480,
+        704
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Mesin Status').first().json.fileId }}"
+        },
+        "options": {
+          "googleFileConversion": {
+            "conversion": {
+              "docsToFormat": "application/pdf",
+              "slidesToFormat": "application/pdf",
+              "sheetsToFormat": "application/pdf"
+            }
+          }
+        }
+      },
+      "id": "72788189-66bc-4ef6-ad71-3b7454cbcfbb",
+      "name": "Unduh PDF Rapor",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        2480,
+        880
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "Mengunduh berkas PDF rapor dari Google Drive (akun yang dipilih harus punya akses ke berkas)."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendDocument",
+        "chatId": "={{ $('Normalisasi Input').first().json.chatId }}",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "🏠 Menu Utama",
+                    "additionalFields": {
+                      "callback_data": "m:main"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "caption": "={{ $('Mesin Status').first().json.caption }}",
+          "fileName": "={{ $('Mesin Status').first().json.fileName }}"
+        }
+      },
+      "id": "5e42a2de-56fd-4e7e-ac12-ee57e319d867",
+      "name": "Kirim Dokumen",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2720,
+        880
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $('Normalisasi Input').first().json.chatId }}",
+        "text": "Mohon maaf, dokumen rapor belum dapat dikirim saat ini. Ketik YA untuk mencoba lagi, atau hubungi admin sekolah (WA 088990090900).",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "🏠 Menu Utama",
+                    "additionalFields": {
+                      "callback_data": "m:main"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "53c0160a-6d49-4442-a6ea-0e7c779b10c3",
+      "name": "Kirim Gagal Dokumen",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2720,
+        1040
+      ],
+      "notes": "Dikirim bila PDF gagal diunduh dari Google Drive. Sesi tidak diubah, jadi pengguna cukup mengetik YA lagi."
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "sesi_bot"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "chat_id",
+              "condition": "eq",
+              "keyValue": "={{ $('Mesin Status').first().json.session.chat_id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "chat_id": "={{ $('Mesin Status').first().json.session.chat_id }}",
+            "state": "={{ $('Mesin Status').first().json.session.state }}",
+            "rapor_type": "={{ $('Mesin Status').first().json.session.rapor_type }}",
+            "nis": "={{ $('Mesin Status').first().json.session.nis }}",
+            "nama": "={{ $('Mesin Status').first().json.session.nama }}",
+            "kelas": "={{ $('Mesin Status').first().json.session.kelas }}",
+            "file_ref": "={{ $('Mesin Status').first().json.session.file_ref }}",
+            "fail_count": "={{ $('Mesin Status').first().json.session.fail_count }}",
+            "fail_since": "={{ $('Mesin Status').first().json.session.fail_since }}",
+            "locked_until": "={{ $('Mesin Status').first().json.session.locked_until }}",
+            "expires_at": "={{ $('Mesin Status').first().json.session.expires_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "chat_id",
+              "displayName": "chat_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "rapor_type",
+              "displayName": "rapor_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "nis",
+              "displayName": "nis",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "nama",
+              "displayName": "nama",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "kelas",
+              "displayName": "kelas",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "file_ref",
+              "displayName": "file_ref",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "fail_count",
+              "displayName": "fail_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "fail_since",
+              "displayName": "fail_since",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "locked_until",
+              "displayName": "locked_until",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "expires_at",
+              "displayName": "expires_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "9d8dcf2b-819f-4695-af9b-836379b74c8a",
+      "name": "Simpan Sesi",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2960,
+        480
+      ],
+      "notes": "Status sesi disimpan SETELAH balasan terkirim (satu baris per chat)."
+    },
+    {
+      "parameters": {},
+      "id": "639d6668-24e0-462d-a331-19feac3223e1",
+      "name": "Setup: Jalankan Sekali",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        1120
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "table",
+        "operation": "create",
+        "tableName": "sesi_bot",
+        "columns": {
+          "column": [
+            {
+              "name": "chat_id",
+              "type": "string"
+            },
+            {
+              "name": "state",
+              "type": "string"
+            },
+            {
+              "name": "rapor_type",
+              "type": "string"
+            },
+            {
+              "name": "nis",
+              "type": "string"
+            },
+            {
+              "name": "nama",
+              "type": "string"
+            },
+            {
+              "name": "kelas",
+              "type": "string"
+            },
+            {
+              "name": "file_ref",
+              "type": "string"
+            },
+            {
+              "name": "fail_count",
+              "type": "number"
+            },
+            {
+              "name": "fail_since",
+              "type": "string"
+            },
+            {
+              "name": "locked_until",
+              "type": "string"
+            },
+            {
+              "name": "expires_at",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {
+          "createIfNotExists": true
+        }
+      },
+      "id": "5914892d-d252-40af-a62d-2cf6728931db",
+      "name": "Buat Tabel sesi_bot",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        1120
+      ],
+      "notes": "Aman dijalankan berulang: bila tabel sudah ada, tidak dibuat ulang."
+    },
+    {
+      "parameters": {
+        "content": "## 📋 Chatbot Rapor & SPMB — SMP IT Abu Bakar (Telegram)\nVersi untuk n8n 2.36.x. Panduan lengkap ada di **README.md**.\n\n### Persiapan (sekali saja)\n1. Buat bot lewat **@BotFather** → salin token → buat credential **Telegram API** di n8n, lalu pasang di semua node Telegram (Trigger + Kirim …).\n2. Klik **Execute** pada cabang **Setup: Jalankan Sekali** (bawah) → tabel `sesi_bot` terbentuk otomatis.\n3. Buat Google Sheet, tab `Data Siswa`, kolom: `NIS | Nama | Kelas | Tanggal Lahir | Intrakurikuler | Kokurikuler | Al Quran` (isi tiga kolom terakhir dengan tautan/ID file PDF di Google Drive).\n4. Pilih dokumen di node **Baca Data Siswa**; pasang credential Google di node itu dan **Unduh PDF Rapor**.\n5. **Publish** workflow, lalu kirim `/start` ke bot Anda.",
+        "height": 400,
+        "width": 1120,
+        "color": 4
+      },
+      "id": "503e0143-57da-4cd6-a072-1adc558d2da6",
+      "name": "Catatan Panduan",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -32,
+        -480
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### 💬 Bagian khusus Telegram\nTelegram Trigger, **Normalisasi Input**, dan semua node **Kirim …** / **Jawab Callback**.\n\nSaat pindah ke WhatsApp (kirimi.id), hanya bagian ini yang diganti. Logika di tengah (Ambil Sesi → Mesin Status → Simpan Sesi) tidak berubah.",
+        "height": 208,
+        "width": 720,
+        "color": 7
+      },
+      "id": "e534550c-2044-41bd-ae89-f829a0592a55",
+      "name": "Catatan Telegram",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -32,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### 🗂️ Sumber data\nData siswa dibaca dari Google Sheets (satu kali baca per pengecekan). Ingin memakai database lain? Ganti node **Baca Data Siswa**, pertahankan bentuk output **Cocokkan Siswa**.",
+        "height": 160,
+        "width": 480,
+        "color": 3
+      },
+      "id": "08003877-736a-46a4-afda-7eb133be2b9b",
+      "name": "Catatan Data",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1408,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### 🔐 Sesi & keamanan\nSesi per chat tersimpan di Data table. Maksimum 5 data tidak cocok per 15 menit, setelah itu dikunci 15 menit. Sesi kedaluwarsa 10 menit. Semua angka ada di **Mesin Status** (KONFIG).",
+        "height": 176,
+        "width": 480,
+        "color": 6
+      },
+      "id": "6643be59-1bf1-4652-a4e5-f9c33e7aa63c",
+      "name": "Catatan Sesi",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        656
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalisasi Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalisasi Input": {
+      "main": [
+        [
+          {
+            "node": "Klik Tombol?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Klik Tombol?": {
+      "main": [
+        [
+          {
+            "node": "Jawab Callback",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ambil Sesi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Jawab Callback": {
+      "main": [
+        [
+          {
+            "node": "Ambil Sesi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ambil Sesi": {
+      "main": [
+        [
+          {
+            "node": "Perlu Cari Siswa?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Perlu Cari Siswa?": {
+      "main": [
+        [
+          {
+            "node": "Baca Data Siswa",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mesin Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Baca Data Siswa": {
+      "main": [
+        [
+          {
+            "node": "Cocokkan Siswa",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cocokkan Siswa": {
+      "main": [
+        [
+          {
+            "node": "Mesin Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mesin Status": {
+      "main": [
+        [
+          {
+            "node": "Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Router": {
+      "main": [
+        [
+          {
+            "node": "Kirim Sambutan",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Kirim Info SPMB",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Kirim Menu Laporan",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Kirim Konfirmasi",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Unduh PDF Rapor",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Kirim Teks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unduh PDF Rapor": {
+      "main": [
+        [
+          {
+            "node": "Kirim Dokumen",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Kirim Gagal Dokumen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Kirim Sambutan": {
+      "main": [
+        [
+          {
+            "node": "Simpan Sesi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Kirim Info SPMB": {
+      "main": [
+        [
+          {
+            "node": "Simpan Sesi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Kirim Menu Laporan": {
+      "main": [
+        [
+          {
+            "node": "Simpan Sesi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Kirim Konfirmasi": {
+      "main": [
+        [
+          {
+            "node": "Simpan Sesi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Kirim Teks": {
+      "main": [
+        [
+          {
+            "node": "Simpan Sesi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Kirim Dokumen": {
+      "main": [
+        [
+          {
+            "node": "Simpan Sesi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Setup: Jalankan Sekali": {
+      "main": [
+        [
+          {
+            "node": "Buat Tabel sesi_bot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Jakarta"
+  },
+  "versionId": "2ccf8859-ee88-45df-a279-ff3558078333",
+  "tags": []
+}
